@@ -1,6 +1,6 @@
 #! /usr/bin/python
 
-"""Tool for synchronize two given paths
+"""Tool for back up and synchronize folders and files
 
 This module helps you to make easy back ups or synchronize folders.
 Useful when you have a folder structure and have to update one of them.
@@ -32,18 +32,18 @@ optional arguments:
 import os
 import sys
 import thread
+import math
 import shutil
 import subprocess as subp
 from time import sleep
 from argparse import ArgumentParser
 from math import ceil, floor
 
-# from exceptions import InputError
-
 template = """%(action)s %(file)s...""".ljust(80)
 
 direction = 'to-right'
 action = 'Copying'
+move_enabled = False
 
 size = 0
 left_files = {}
@@ -59,40 +59,39 @@ def _get_size_linux2(file):
 def _get_size_win32(file):
     raise NotImplementedError("Platform not supported (yet!).")
 
-if sys.platform == 'win32':
-    import timeit
-    default_timer = timeit.timeit
-    get_size = globals()['_get_size_win32']
 if sys.platform == 'linux2':
     import time
     default_timer = time.time
     get_size = globals()['_get_size_linux2']
+elif sys.platform == 'win32':
+    import timeit
+    default_timer = timeit.timeit
+    get_size = globals()['_get_size_win32']
 else:
     print "Platform not supported."
     sys.exit(3)
-    
+
 def get_parser():
     parser = ArgumentParser(description="""Synchronize two directories (in one
                                            or both directions), moving or
                                            copying files.""",
                             prog=__file__)
-    parser.add_argument('left_path', 
+    parser.add_argument('left_path',
                         action='store',
                         help='Left path of synchronization')
-    parser.add_argument('right_path', 
+    parser.add_argument('right_path',
                         action='store',
                         help='Right path of synchronization')
-    parser.add_argument('-l', '--logfile', 
-                        nargs=1, 
-                        action='store',
-                        help='save log of the transfer')
-    parser.add_argument('-d', '--direction', 
+    parser.add_argument('-l',
+                        action='store_true',
+                        help='save a log of the transfer')
+    parser.add_argument('-d', '--direction',
                         choices=['to-left', 'to-right', 'both'],
                         action='store',
                         help='direction of synchronization (default: to-left)')
-    parser.add_argument('-a', '--action',
+    parser.add_argument('-a',
                         choices=['move', 'copy'],
-                        nargs=1, 
+                        dest='action',
                         action='store',
                         help='action to be performed (default: copy)')
     parser.add_argument('-t',
@@ -103,7 +102,7 @@ def get_parser():
                         dest='update_for_mtime',
                         action='store_false',
                         help="""
-                            don't update file if modification time is less 
+                            don't update file if modification time is less
                             than new file""")
     parser.add_argument('-b',
                         dest='overwrite_if_bigger',
@@ -112,24 +111,37 @@ def get_parser():
     return parser
 
 def get_valid_path_from(path):
-    if not os.path.exists(path):
-        # raise InputError("invalid path")
-        print "invalid path: %s" % path
-        sys.exit(2)
-    elif os.path.isdir(path):
-        if not path.endswith('/'):
-            return path
-        else:
-            return path[:-1]
+    if not os.access(path, os.R_OK):
+        print "You don't have permissions to read the path."
+        sys.exit()
     else:
-        return path
+        if not os.path.exists(path):
+            # raise InputError("invalid path")
+            print "invalid path: %s" % path
+            sys.exit(2)
+        elif os.path.isdir(path):
+            if not path.endswith('/'):
+                return path
+            else:
+                return path[:-1]
+        else:
+            return path
+
+def have_permissions(src, dst):
+    if not os.access(src, os.R_OK):
+        print "You don't have permissions to read %s" % src
+        return False
+    # NOT WORKING FOR NOW
+    # elif not os.access(dst, os.W_OK):
+    #     print "You don't have permissions to write %s" % dst
+    #     return False
+    return True
 
 def sizeof_fmt(num, suffix='B'):
-    for unit in ['','Ki','Mi','Gi','Ti','Pi','Ei','Zi']:
-        if abs(num) < 1024.0:
-            return "%3.1f%s%s" % (num, unit, suffix)
-        num /= 1024.0
-    return "%.1f%s%s" % (num, 'Yi', suffix)
+    prefix = ['','Ki','Mi','Gi','Ti','Pi','Ei','Zi']
+    exp = math.log(num, 1000)
+    index = int(exp)
+    return "%.1f%s%s" % (num*1.0/1000**index, prefix[index], suffix)
 
 def transfer_rate(dst, interval=time_sampling):
     while True:
@@ -138,10 +150,10 @@ def transfer_rate(dst, interval=time_sampling):
         final_size = int(subp.check_output(['du','-bs', dst]).split()[0])
         num = (final_size - initial_size)/interval
         sys.stdout.write("Transfer rate: %s.       \r" % sizeof_fmt(num, 'B/s'))
-        sys.stdout.flush() 
+        sys.stdout.flush()
 
 def progress_bar(dst, bar_len=53, decimals=0, interval=time_sampling):
-    global size
+    # global size
     ini_size = get_size(dst)
     while True:
         actual_size = int(subp.check_output(['du','-bs', dst]).split()[0])
@@ -151,17 +163,22 @@ def progress_bar(dst, bar_len=53, decimals=0, interval=time_sampling):
         bar = "%s%s" % ('#' * filled, '-' * (bar_len - filled))
         sys.stdout.write("""Progress: [%s] %s%% complete\r""" % (bar, percents))
         # sys.stdout.write('%d / %d                 \r' % (actual_size - ini_size, size))
-        sys.stdout.flush() 
+        sys.stdout.flush()
         sleep(0.1)
 
 def transfer(src, dst):
-    if os.path.isdir(src):
+    # global move_enabled
+    # print move_enabled
+    if move_enabled:
+        os.path.move(src, dst)
+    elif os.path.isdir(src):
         shutil.copytree(src, dst)
     else:
         shutil.copy2(src, dst)
 
 def process_path(src, dst, dict_files, flag_mtime):
     global size
+    # global move_enabled
     if os.path.isdir(src):
         l_src = os.listdir(src)
         l_dst = os.listdir(dst)
@@ -179,33 +196,41 @@ def process_path(src, dst, dict_files, flag_mtime):
                     if dst_modified < src_modified and os.path.isfile(src_new):
                         dict_files[src_new] = dst_new
                         size = size + get_size(src_new)
-                process_path(src_new, dst_new, dict_files, flag_mtime)
+                process_path(src_new, dst_new,
+                             dict_files, flag_mtime)
+
+def print_move():
+    # global move_enabled
+    print "Move enabled:", move_enabled
+    print "Direction:", direction
+    print "Action:", action
 
 if __name__ == "__main__":
     args = get_parser().parse_args()
     left_path = args.left_path
     right_path = args.right_path
-    if args.logfile is not None:
-        logfile = args.logfile
+
     if args.direction is not None:
         direction = args.direction
     if args.action is not None:
         if args.action == "move":
+            move_enabled = True
             action = "Moving"
-
+    # print sizeof_fmt2("/home/fucker/Fucker!.pls")
+    print_move()
     left_path = get_valid_path_from(left_path)
     right_path = get_valid_path_from(right_path)
 
     if direction == 'to-right':
-        process_path(left_path, right_path, 
+        process_path(left_path, right_path,
                      left_files, args.update_for_mtime)
     elif direction == 'to-left':
-        process_path(right_path, left_path, 
+        process_path(right_path, left_path,
                      right_files, args.update_for_mtime)
     else:
-        process_path(left_path, right_path, 
+        process_path(left_path, right_path,
                      left_files, args.update_for_mtime)
-        process_path(right_path, left_path, 
+        process_path(right_path, left_path,
                      right_files, args.update_for_mtime)
 
     if size == 0:
@@ -218,30 +243,36 @@ if __name__ == "__main__":
             thread.start_new_thread(progress_bar, (right_path, ))
             start_t = default_timer()
 
+            # for f in left_files:
+            #     transfer(f, left_files.get(f))
+            #     print template % {'action': action, 'file': f}
             if direction == 'to-right':
                 for f in left_files:
-                    # print left_files.get(f)
-                    print template % {'action': action, 'file': f}
-                    transfer(f, left_files.get(f))
+                    if have_permissions(f, left_files.get(f)):
+                        transfer(f, left_files.get(f))
+                        print template % {'action': action, 'file': f}
             elif direction == 'to-left':
                 for f in right_files:
-                    transfer(f, right_files.get(f))
+                    if have_permissions(f, right_files.get(f)):
+                        transfer(f, right_files.get(f))
+                        print template % {'action': action, 'file': f}
             else:
                 for f in left_files:
-                    print template % {'action': action, 'file': f}
-                    transfer(f, left_files.get(f))
+                    if have_permissions(f, left_files.get(f)):
+                        transfer(f, left_files.get(f))
+                        print template % {'action': action, 'file': f}
                 for f in right_files:
-                    print template % {'action': action, 'file': f}
-                    transfer(f, right_files.get(f))
+                    if have_permissions(f, right_files.get(f)):
+                        transfer(f, right_files.get(f))
+                        print template % {'action': action, 'file': f}
 
             elapsed_t = default_timer() - start_t
 
-            print 
             print "\nTotal size transferred: %s" % sizeof_fmt(size)
             print """
                   %s tranferred in %d seconds (average: %s)
-                  """ % (sizeof_fmt(size), 
-                    elapsed_t, 
+                  """ % (sizeof_fmt(size),
+                    elapsed_t,
                     sizeof_fmt(size/elapsed_t, suffix="B/s"))
         elif ans.upper() != "N":
             print "Invalid option."
